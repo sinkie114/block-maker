@@ -146,7 +146,7 @@ public final class BlockSession {
                 if (!current.equals(next)) {
                     // Replacing a container must not spill its contents; the document is the source of truth.
                     BlockEntity old = target.getBlockEntity(pos);
-                    if (old != null && !current.is(next.getBlock())) Clearable.tryClear(old);
+                    if (old instanceof Clearable clearable && !current.is(next.getBlock())) clearable.clearContent();
                     int flags = neighbours ? Block.UPDATE_ALL : Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE;
                     if (!target.setBlock(pos, next, flags) && !target.getBlockState(pos).equals(next))
                         throw new IllegalStateException("世界拒绝放置该方块（可能超出建筑高度）");
