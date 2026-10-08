@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "block-maker",
+  "version": "${version}",
+  "name": "Block Maker",
+  "description": "方块数据调试器：对准方块编辑方块状态与方块实体 SNBT，单人同步写回、多人只读。",
+  "authors": [
+    "sinkie114"
+  ],
+  "license": "CC0-1.0",
+  "icon": "assets/block-maker/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.sinkie114.blockmaker.client.BlockMakerClient"
+    ],
+    "modmenu": [
+      "com.sinkie114.blockmaker.client.compat.BlockMakerModMenu"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "modmenu": "*"
+  }
+}
