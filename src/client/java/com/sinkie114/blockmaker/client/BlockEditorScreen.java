@@ -27,6 +27,8 @@ public final class BlockEditorScreen extends Screen implements BlockLayer {
     private int x, y, w, h, offset, pageSize, revision;
     private List<Property<?>> properties = List.of();
     private Button syncButton;
+    /** First close with unsynced edits only warns; a second close discards them. */
+    private boolean confirmClose;
 
     public BlockEditorScreen(BlockSession session) {
         super(Component.literal("方块数据调试器"));
@@ -51,6 +53,9 @@ public final class BlockEditorScreen extends Screen implements BlockLayer {
             session.neighborUpdates = !session.neighborUpdates; rebuildWidgets();
         }).bounds(x + 246, y + 34, 96, 20).tooltip(Tooltip.create(Component.literal(
                 "开：同步时像普通放置一样通知相邻方块。\n关：只更新方块本身，不触发沙子下落、红石或形状更新。"))).build()).active = writable();
+        addRenderableWidget(Button.builder(Component.literal("重新读取"), b -> session.reload()).bounds(x + 346, y + 34, 70, 20)
+                .tooltip(Tooltip.create(Component.literal("放弃副本中的修改，重新读取世界中的方块（可撤销）"))).build())
+                .active = session.loaded && !session.syncing;
 
         properties = session.preview == null ? List.of() : List.copyOf(session.preview.getProperties());
         int top = y + 62;
@@ -135,9 +140,39 @@ public final class BlockEditorScreen extends Screen implements BlockLayer {
     private void copy(CompoundTag data, String what) {
         minecraft.keyboardHandler.setClipboard(data.toString()); session.status = "已复制" + what + "（SNBT）";
     }
+    private void copySetblock() {
+        if (!session.error.isEmpty()) { session.status = "数据无效，无法生成命令：" + session.error; return; }
+        String command = BlockData.setblockCommand(session.pos, session.document);
+        minecraft.keyboardHandler.setClipboard(command);
+        session.status = "已复制 /setblock 命令（" + command.length() + " 字符" + (command.length() > 256 ? "，超过聊天栏 256 字符上限，请粘贴到命令方块" : "") + "）";
+    }
+
+    private static Path exportDir(Path gameDir) { return gameDir.resolve("block-maker").resolve("exports"); }
+
+    /** Lists exported .snbt files, newest first; the chosen one opens in the SNBT editor before it reaches the copy. */
+    private void importFile() {
+        if (!writable()) return;
+        Path dir = exportDir(minecraft.gameDirectory.toPath());
+        List<OptionPickerScreen.Option> options = new ArrayList<>();
+        try (var files = Files.list(dir)) {
+            files.filter(f -> f.getFileName().toString().endsWith(".snbt") && Files.isRegularFile(f))
+                    .sorted(Comparator.comparing((Path f) -> f.getFileName().toString()).reversed())
+                    .forEach(f -> options.add(new OptionPickerScreen.Option(f.getFileName().toString(), f.getFileName().toString(), f.toString())));
+        } catch (Exception ex) { /* missing folder: nothing exported yet */ }
+        if (options.isEmpty()) { session.status = "没有可导入的文件：" + dir; return; }
+        minecraft.setScreen(new OptionPickerScreen(this, "从文件导入", options, name -> {
+            try {
+                Path file = dir.resolve(name);
+                if (Files.size(file) > 4 * 1024 * 1024) throw new IllegalArgumentException("文件超过 4 MB");
+                String text = Files.readString(file, StandardCharsets.UTF_8);
+                minecraft.setScreen(new SnbtDialog(this, "导入 " + name, text, true, session::edit));
+            } catch (Exception ex) { minecraft.setScreen(this); session.status = "导入失败：" + ex.getMessage(); }
+        }));
+    }
+
     private void export() {
         try {
-            Path dir = minecraft.gameDirectory.toPath().resolve("block-maker").resolve("exports");
+            Path dir = exportDir(minecraft.gameDirectory.toPath());
             Files.createDirectories(dir);
             Path file = dir.resolve("block-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS")) + ".snbt");
             Files.writeString(file, session.document.toString(), StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
@@ -150,18 +185,18 @@ public final class BlockEditorScreen extends Screen implements BlockLayer {
         SnbtMenu() { super(Component.literal("SNBT 复制、粘贴与导出")); }
         @Override public BlockSession session() { return session; }
         @Override protected void init() {
-            sw = Math.min(320, width - 16); sh = Math.min(214, height - 16); sx = (width - sw) / 2; sy = (height - sh) / 2;
-            String[] labels = {"复制副本", "复制原方块", "编辑全部 SNBT", "粘贴 SNBT", "导出文件", "返回"};
-            Runnable[] tasks = {() -> copy(session.document, "副本"), () -> copy(session.observed, "原方块"),
+            String[] labels = {"复制副本", "复制原方块", "复制 /setblock 命令", "编辑全部 SNBT", "粘贴 SNBT", "导出文件", "从文件导入", "返回"};
+            sw = Math.min(320, width - 16); sh = Math.min(36 + labels.length * 26, height - 16); sx = (width - sw) / 2; sy = (height - sh) / 2;
+            Runnable[] tasks = {() -> copy(session.document, "副本"), () -> copy(session.observed, "原方块"), BlockEditorScreen.this::copySetblock,
                     () -> minecraft.setScreen(new SnbtDialog(BlockEditorScreen.this, "全部数据（state / block_entity）", session.document.toString(), writable(), session::edit)),
                     () -> minecraft.setScreen(new SnbtDialog(BlockEditorScreen.this, "从剪贴板导入 SNBT", minecraft.keyboardHandler.getClipboard(), true, session::edit)),
-                    BlockEditorScreen.this::export, () -> {}};
+                    BlockEditorScreen.this::export, BlockEditorScreen.this::importFile, () -> {}};
             for (int i = 0; i < labels.length; i++) {
                 Runnable task = tasks[i];
                 Button b = addRenderableWidget(Button.builder(Component.literal(labels[i]), button -> {
                     minecraft.setScreen(BlockEditorScreen.this); task.run();
                 }).bounds(sx + 8, sy + 28 + i * 26, sw - 16, 20).build());
-                if (i == 3) b.active = writable();
+                if (i == 4 || i == 6) b.active = writable();
             }
         }
         @Override public void onClose() { minecraft.setScreen(BlockEditorScreen.this); }
@@ -173,11 +208,25 @@ public final class BlockEditorScreen extends Screen implements BlockLayer {
     }
 
     @Override public void tick() {
-        if (revision != session.revision) rebuildWidgets();
+        if (revision != session.revision) { confirmClose = false; rebuildWidgets(); }
         if (syncButton != null) syncButton.active = session.writable();
     }
-    @Override public void onClose() { session.close(); }
+    @Override public void onClose() {
+        if (session.dirty() && !session.syncing && !confirmClose) {
+            confirmClose = true; session.status = "有未同步的修改，再次关闭将丢弃它们";
+            return;
+        }
+        session.close();
+    }
     @Override public boolean isPauseScreen() { return false; }
+    @Override public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if (properties.size() > pageSize && scrollY != 0) {
+            int target = offset + (scrollY < 0 ? pageSize : -pageSize);
+            if (target >= 0 && target < properties.size()) { offset = target; rebuildWidgets(); }
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+    }
     @Override public boolean keyPressed(KeyEvent key) {
         if (key.isEscape() || minecraft.options.keyInventory.matches(key)) { onClose(); return true; }
         if (key.hasControlDown()) {
@@ -207,7 +256,7 @@ public final class BlockEditorScreen extends Screen implements BlockLayer {
                 : !session.status.isEmpty() ? session.status
                 : session.editable ? "修改仅保留在副本中，点击“同步”写回世界。" : "多人 · 严格只读：可以查看和复制。";
         if (!warning.isEmpty()) g.drawString(font, font.plainSubstrByWidth(warning, w - 16), x + 8, y + h - 56, 0xFFAA2222, false);
-        boolean bad = !session.error.isEmpty() || feedback.startsWith("同步失败");
+        boolean bad = !session.error.isEmpty() || feedback.startsWith("同步失败") || confirmClose;
         g.drawString(font, font.plainSubstrByWidth(feedback, w - 16), x + 8, y + h - 44, bad ? 0xFFAA2222 : 0xFF555555, false);
         super.render(g, mx, my, delta);
         if (my >= y + h - 47 && my < y + h - 33 && font.width(feedback) > w - 16) g.setTooltipForNextFrame(font, Component.literal(feedback), mx, my);

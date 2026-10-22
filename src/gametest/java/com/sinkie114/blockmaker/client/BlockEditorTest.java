@@ -81,6 +81,21 @@ public final class BlockEditorTest implements FabricClientGameTest {
             check(session.status.startsWith("同步失败"), "Failed sync is reported: " + session.status);
             session.undo();
             check(session.error.isEmpty(), "Undo leaves the invalid state");
+            String command = BlockData.setblockCommand(pos, session.document);
+            check(command.startsWith("/setblock " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + " minecraft:oak_stairs[") && command.contains("facing=east"),
+                    "Setblock command: " + command);
+
+            CompoundTag south = session.document.copy();
+            BlockData.stateTag(south).getCompoundOrEmpty("Properties").putString("facing", "south");
+            session.edit(south);
+            check(session.dirty(), "Unsynced edits are tracked");
+            c.screen.onClose();
+            check(c.screen instanceof BlockEditorScreen && session.status.contains("未同步"), "First close with unsynced edits only warns");
+            session.reload();
+            check(!session.dirty() && session.preview.getValue(BlockStateProperties.HORIZONTAL_FACING) == Direction.EAST, "Reload returns to the world block");
+            session.undo();
+            check(session.preview.getValue(BlockStateProperties.HORIZONTAL_FACING) == Direction.SOUTH, "Reload can be undone");
+            session.reload();
             session.close();
         });
         context.waitTicks(2);
@@ -122,6 +137,29 @@ public final class BlockEditorTest implements FabricClientGameTest {
             check(s.overworld().getBlockState(pos).is(Blocks.STONE), "Block type can be replaced");
             check(s.overworld().getEntitiesOfClass(ItemEntity.class, new AABB(pos).inflate(3)).isEmpty(), "Replacing a container must not spill items");
         });
+        // A pasted document may change the block type and carry block-entity data in one sync.
+        context.runOnClient(c -> session(c).edit(parse("{state:{Name:\"minecraft:chest\",Properties:{facing:\"south\"}},"
+                + "block_entity:{id:\"minecraft:chest\",Items:[{Slot:1b,id:\"minecraft:emerald\",count:7}]}}")));
+        context.runOnClient(c -> check(session(c).error.isEmpty(), "Pasted chest is valid: " + session(c).error));
+        click(context, "同步");
+        context.waitFor(c -> session(c).status.startsWith("同步"));
+        context.runOnClient(c -> check(session(c).status.equals("同步成功"), "Pasted chest sync: " + session(c).status));
+        server.runOnServer(s -> {
+            ItemStack stack = ((ChestBlockEntity) s.overworld().getBlockEntity(pos)).getItem(1);
+            check(stack.is(Items.EMERALD) && stack.getCount() == 7, "Block entity data survives a block type change: " + stack);
+        });
+        context.runOnClient(c -> {
+            var session = session(c);
+            CompoundTag wrong = session.document.copy();
+            wrong.getCompoundOrEmpty(BlockData.BLOCK_ENTITY).putString("id", "minecraft:furnace");
+            session.edit(wrong);
+            check(session.error.contains("minecraft:furnace"), "Mismatched block entity id is rejected: " + session.error);
+            CompoundTag stone = parse("{state:{Name:\"minecraft:stone\"},block_entity:{}}");
+            session.edit(stone);
+            check(!session.error.isEmpty(), "Block entity data on a block without one is rejected");
+            session.reload();
+            check(session.error.isEmpty() && !session.dirty(), "Reload clears invalid edits");
+        });
         context.runOnClient(c -> c.screen.onClose());
         context.waitTicks(2);
     }
@@ -141,6 +179,10 @@ public final class BlockEditorTest implements FabricClientGameTest {
         context.takeScreenshot("block-maker-read-only");
         context.runOnClient(c -> c.screen.onClose());
         context.waitTicks(2);
+    }
+
+    private static CompoundTag parse(String snbt) {
+        try { return TagParser.parseCompoundFully(snbt); } catch (Exception ex) { throw new AssertionError(ex); }
     }
 
     private static BlockSession session(Minecraft c) { return ((BlockLayer) c.screen).session(); }
