@@ -1,5 +1,6 @@
 package com.sinkie114.blockmaker.client;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
@@ -8,6 +9,7 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
@@ -79,7 +81,43 @@ public final class BlockData {
                     + "；可用属性：" + String.join(", ", propertyNames(block)));
             state = with(state, property, text(properties.get(key), key));
         }
+        if (blockEntity instanceof CompoundTag data) checkBlockEntity(state, data);
         return state;
+    }
+
+    /**
+     * block_entity must belong to the target block: a block without a block entity cannot take data, and a mismatched
+     * {@code id} (for example chest data on a furnace) would silently lose fields, so both are errors before any write.
+     */
+    public static void checkBlockEntity(BlockState state, CompoundTag data) {
+        String name = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
+        if (!state.hasBlockEntity() || !(state.getBlock() instanceof EntityBlock entityBlock))
+            throw new IllegalArgumentException(name + " 没有方块实体，请删除 block_entity");
+        String id = data.getStringOr("id", "");
+        if (id.isEmpty()) return;
+        Identifier wanted = Identifier.tryParse(id);
+        BlockEntity probe = entityBlock.newBlockEntity(BlockPos.ZERO, state);
+        Identifier actual = probe == null ? null : BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(probe.getType());
+        if (actual != null && !actual.equals(wanted))
+            throw new IllegalArgumentException("block_entity.id 是 " + id + "，但 " + name + " 的方块实体是 " + actual);
+    }
+
+    /** {@code /setblock x y z id[props]{data}}; id and coordinates are left out of the data, the command supplies them. */
+    public static String setblockCommand(BlockPos pos, CompoundTag document) {
+        CompoundTag state = stateTag(document);
+        StringBuilder command = new StringBuilder("/setblock ").append(pos.getX()).append(' ').append(pos.getY()).append(' ').append(pos.getZ())
+                .append(' ').append(state.getStringOr("Name", "minecraft:air"));
+        CompoundTag properties = state.getCompoundOrEmpty("Properties");
+        if (!properties.isEmpty()) {
+            StringJoiner joined = new StringJoiner(",", "[", "]");
+            for (String key : properties.keySet()) joined.add(key + "=" + text(properties.get(key), key));
+            command.append(joined);
+        }
+        if (document.get(BLOCK_ENTITY) instanceof CompoundTag data) {
+            CompoundTag copy = data.copy(); copy.remove("id");
+            if (!copy.isEmpty()) command.append(copy);
+        }
+        return command.toString();
     }
 
     /** Vanilla writes values as strings; numbers and booleans typed by hand are accepted too. */

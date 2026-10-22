@@ -143,6 +143,7 @@ public final class BlockSession {
                 ServerLevel target = serverLevel();
                 BlockState next = BlockData.decodeState(requested);
                 BlockState current = target.getBlockState(pos);
+                CompoundTag data = requested.get(BlockData.BLOCK_ENTITY) instanceof CompoundTag c ? c : null;
                 if (!current.equals(next)) {
                     // Replacing a container must not spill its contents; the document is the source of truth.
                     BlockEntity old = target.getBlockEntity(pos);
@@ -151,9 +152,8 @@ public final class BlockSession {
                     if (!target.setBlock(pos, next, flags) && !target.getBlockState(pos).equals(next))
                         throw new IllegalStateException("世界拒绝放置该方块（可能超出建筑高度）");
                 }
-                CompoundTag data = requested.get(BlockData.BLOCK_ENTITY) instanceof CompoundTag c ? c : null;
-                // A changed block type gets a fresh block entity; old data is only applied when the type is unchanged.
-                if (data != null && current.is(next.getBlock())) {
+                // Applies to a changed block type too (for example a pasted chest with items), validated by decodeState.
+                if (data != null) {
                     BlockEntity blockEntity = target.getBlockEntity(pos);
                     if (blockEntity == null) throw new IllegalStateException("该方块没有方块实体，无法写入 block_entity");
                     blockEntity.loadWithComponents(TagValueInput.create(ProblemReporter.DISCARDING, target.registryAccess(), data));
@@ -162,7 +162,7 @@ public final class BlockSession {
                     target.sendBlockUpdated(pos, placed, placed, Block.UPDATE_ALL);
                 }
                 actual = BlockData.encode(target.getBlockState(pos), target.getBlockEntity(pos), target.registryAccess());
-                ignored = differences(next, requested, actual, current.is(next.getBlock()));
+                ignored = differences(next, requested, actual);
             } catch (RuntimeException ex) { failure = ex.getMessage() == null ? ex.toString() : ex.getMessage(); }
             CompoundTag result = actual; String reason = failure; List<String> notes = ignored;
             client.execute(() -> {
@@ -179,14 +179,29 @@ public final class BlockSession {
     }
 
     /** Honest feedback: name every requested field that did not survive the write. */
-    private static List<String> differences(BlockState next, CompoundTag requested, CompoundTag actual, boolean sameBlock) {
+    private static List<String> differences(BlockState next, CompoundTag requested, CompoundTag actual) {
         List<String> notes = new ArrayList<>();
         // Compare normalised states, so omitted default properties are not reported.
         if (!BlockData.encodeState(next).equals(actual.get(BlockData.STATE))) notes.add("方块状态");
-        if (sameBlock && requested.get(BlockData.BLOCK_ENTITY) instanceof CompoundTag wanted && actual.get(BlockData.BLOCK_ENTITY) instanceof CompoundTag got) {
-            for (String key : wanted.keySet()) if (!Objects.equals(wanted.get(key), got.get(key))) notes.add("block_entity." + key);
+        if (requested.get(BlockData.BLOCK_ENTITY) instanceof CompoundTag wanted) {
+            if (actual.get(BlockData.BLOCK_ENTITY) instanceof CompoundTag got) {
+                for (String key : wanted.keySet()) if (!Objects.equals(wanted.get(key), got.get(key))) notes.add("block_entity." + key);
+            } else notes.add("block_entity");
         }
         return notes;
+    }
+
+    /** True when the copy holds edits that are not in the world yet. */
+    public boolean dirty() { return editable && loaded && !document.equals(baseline); }
+
+    /** Discards the copy and starts again from the block as it is in the world now; undo can bring the edits back. */
+    public void reload() {
+        if (syncing || !loaded) return;
+        CompoundTag fresh = editable ? observed.copy() : readClient();
+        if (writable()) edit(fresh);
+        else { document = fresh; revision++; refresh(); }
+        baseline = fresh.copy(); observed = fresh.copy(); changed = false;
+        status = "已重新读取世界中的方块";
     }
 
     public void close() {
